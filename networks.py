@@ -15,27 +15,33 @@ except ImportError: # will be 3.x series
 # Discriminator
 ##################################################################################
 
+
 class MsImageDis(nn.Module):
     # Multi-scale discriminator architecture
     def __init__(self, input_dim, params):
         super(MsImageDis, self).__init__()
+        self.num_classes = params['num_classes']
+        self.label_emb = nn.Embedding(params['batch_size'], params['num_classes'])  # TODO
         self.n_layer = params['n_layer']
         self.gan_type = params['gan_type']
         self.dim = params['dim']
         self.norm = params['norm']
         self.activ = params['activ']
         self.num_scales = params['num_scales']
+        self.img_size = params['img_size']
         self.pad_type = params['pad_type']
         self.input_dim = input_dim
         self.downsample = nn.AvgPool2d(3, stride=2, padding=[1, 1], count_include_pad=False)
         self.cnns = nn.ModuleList()
+        self.cnn_gen = nn.ModuleList()
         for _ in range(self.num_scales):
-            self.cnns.append(self._make_net())
+            self.cnns.append(self._make_net(self.num_classes))
+            self.cnn_gen.append(self._make_net(0))
 
-    def _make_net(self):
+    def _make_net(self, num_classes):
         dim = self.dim
         cnn_x = []
-        cnn_x += [Conv2dBlock(self.input_dim, dim, 4, 2, 1, norm='none', activation=self.activ, pad_type=self.pad_type)]
+        cnn_x += [Conv2dBlock(self.input_dim+num_classes, dim, 4, 2, 1, norm='none', activation=self.activ, pad_type=self.pad_type)]
         for i in range(self.n_layer - 1):
             cnn_x += [Conv2dBlock(dim, dim * 2, 4, 2, 1, norm=self.norm, activation=self.activ, pad_type=self.pad_type)]
             dim *= 2
@@ -43,17 +49,24 @@ class MsImageDis(nn.Module):
         cnn_x = nn.Sequential(*cnn_x)
         return cnn_x
 
-    def forward(self, x):
+    def forward(self, x, cnn):
         outputs = []
-        for model in self.cnns:
+        for model in cnn:
             outputs.append(model(x))
             x = self.downsample(x)
         return outputs
 
-    def calc_dis_loss(self, input_fake, input_real):
+    def calc_dis_loss(self, input_fake, input_real, label):
         # calculate the loss to train D
-        outs0 = self.forward(input_fake)
-        outs1 = self.forward(input_real)
+        # outs0 = self.forward(input_fake)
+        # outs1 = self.forward(input_real)
+        lb0 = label.view(label.shape[0], label.shape[1], 1, 1)
+        lb0 = lb0.repeat(1, 1, input_fake.shape[2], input_fake.shape[3])
+        lb0 = lb0.to('cuda:0')
+        input_fake = torch.cat([input_fake, lb0], 1)
+        input_real = torch.cat([input_real, lb0], 1)
+        outs0 = self.forward(input_fake, self.cnns)
+        outs1 = self.forward(input_real, self.cnns)
         loss = 0
 
         for it, (out0, out1) in enumerate(zip(outs0, outs1)):
@@ -70,7 +83,7 @@ class MsImageDis(nn.Module):
 
     def calc_gen_loss(self, input_fake):
         # calculate the loss to train G
-        outs0 = self.forward(input_fake)
+        outs0 = self.forward(input_fake, self.cnn_gen)
         loss = 0
         for it, (out0) in enumerate(outs0):
             if self.gan_type == 'lsgan':
@@ -85,6 +98,7 @@ class MsImageDis(nn.Module):
 ##################################################################################
 # Generator
 ##################################################################################
+
 
 class AdaINGen(nn.Module):
     # AdaIN auto-encoder architecture
@@ -103,22 +117,27 @@ class AdaINGen(nn.Module):
 
         # content encoder
         self.enc_content = ContentEncoder(n_downsample, n_res, input_dim, dim, 'in', activ, pad_type=pad_type)
-        self.dec = Decoder(n_downsample, n_res, self.enc_content.output_dim, input_dim, res_norm='adain', activ=activ, pad_type=pad_type)
+        self.dec = Decoder(n_downsample, n_res,
+                           self.enc_content.output_dim,
+                           input_dim,
+                           res_norm='adain',
+                           activ=activ,
+                           pad_type=pad_type)
 
         # MLP to generate AdaIN parameters
         self.mlp = MLP(style_dim, self.get_num_adain_params(self.dec), mlp_dim, 3, norm='none', activ=activ)
 
     def forward(self, images):
         # reconstruct an image
-        content, style_fake = self.encode(images)
+        content, style_fake, _ = self.encode(images)
         images_recon = self.decode(content, style_fake)
         return images_recon
 
     def encode(self, images):
         # encode an image to its content and style codes
-        style_fake = self.enc_style(images)
+        style_fake, style_label = self.enc_style(images)
         content = self.enc_content(images)
-        return content, style_fake
+        return content, style_fake, style_label
 
     def decode(self, content, style):
         # decode content and style codes to an image
@@ -162,9 +181,10 @@ class VAEGen(nn.Module):
         self.dec = Decoder(n_downsample, n_res, self.enc.output_dim, input_dim, res_norm='in', activ=activ, pad_type=pad_type)
 
     def forward(self, images):
-        # This is a reduced VAE implementation where we assume the outputs are multivariate Gaussian distribution with mean = hiddens and std_dev = all ones.
+        # This is a reduced VAE implementation where we assume the outputs are multivariate Gaussian distribution
+        # with mean = hiddens and std_dev = all ones.
         hiddens = self.encode(images)
-        if self.training == True:
+        if self.training:
             noise = Variable(torch.randn(hiddens.size()).cuda(hiddens.data.get_device()))
             images_recon = self.decode(hiddens + noise)
         else:
@@ -189,19 +209,35 @@ class StyleEncoder(nn.Module):
     def __init__(self, n_downsample, input_dim, dim, style_dim, norm, activ, pad_type):
         super(StyleEncoder, self).__init__()
         self.model = []
+        self.num_classes = 5  # TODO
         self.model += [Conv2dBlock(input_dim, dim, 7, 1, 3, norm=norm, activation=activ, pad_type=pad_type)]
         for i in range(2):
             self.model += [Conv2dBlock(dim, 2 * dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
             dim *= 2
         for i in range(n_downsample - 2):
             self.model += [Conv2dBlock(dim, dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
-        self.model += [nn.AdaptiveAvgPool2d(1)] # global average pooling
+        self.model_no_style_dim = nn.Sequential(*self.model)
+        self.model += [nn.AdaptiveAvgPool2d(1)]  # global average pooling
         self.model += [nn.Conv2d(dim, style_dim, 1, 1, 0)]
         self.model = nn.Sequential(*self.model)
         self.output_dim = dim
+        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(8*256*8, 128)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(128, self.num_classes)
 
     def forward(self, x):
-        return self.model(x)
+        x_feat = self.model(x)
+        x_logit = self.model_no_style_dim(x)
+        x_logit = self.maxpool(x_logit)
+        # x_logit = x_logit.view(x_logit.size(3), x_logit.size(1), x_logit.size(2), x_logit.size(0))
+        x_logit = self.flatten(x_logit)
+        x_logit = self.fc1(x_logit)
+        x_logit = self.relu(x_logit)
+        x_logit = self.fc2(x_logit)
+        return x_feat, x_logit
+
 
 class ContentEncoder(nn.Module):
     def __init__(self, n_downsample, n_res, input_dim, dim, norm, activ, pad_type):
@@ -219,6 +255,7 @@ class ContentEncoder(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
 
 class Decoder(nn.Module):
     def __init__(self, n_upsample, n_res, dim, output_dim, res_norm='adain', activ='relu', pad_type='zero'):
@@ -242,6 +279,8 @@ class Decoder(nn.Module):
 ##################################################################################
 # Sequential Models
 ##################################################################################
+
+
 class ResBlocks(nn.Module):
     def __init__(self, num_blocks, dim, norm='in', activation='relu', pad_type='zero'):
         super(ResBlocks, self).__init__()
@@ -252,6 +291,7 @@ class ResBlocks(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
 
 class MLP(nn.Module):
     def __init__(self, input_dim, output_dim, dim, n_blk, norm='none', activ='relu'):
@@ -270,6 +310,8 @@ class MLP(nn.Module):
 ##################################################################################
 # Basic Blocks
 ##################################################################################
+
+
 class ResBlock(nn.Module):
     def __init__(self, dim, norm='in', activation='relu', pad_type='zero'):
         super(ResBlock, self).__init__()
@@ -284,6 +326,7 @@ class ResBlock(nn.Module):
         out = self.model(x)
         out += residual
         return out
+
 
 class Conv2dBlock(nn.Module):
     def __init__(self, input_dim ,output_dim, kernel_size, stride,
@@ -343,6 +386,7 @@ class Conv2dBlock(nn.Module):
             x = self.activation(x)
         return x
 
+
 class LinearBlock(nn.Module):
     def __init__(self, input_dim, output_dim, norm='none', activation='relu'):
         super(LinearBlock, self).__init__()
@@ -390,6 +434,8 @@ class LinearBlock(nn.Module):
 ##################################################################################
 # VGG network definition
 ##################################################################################
+
+
 class Vgg16(nn.Module):
     def __init__(self):
         super(Vgg16, self).__init__()
@@ -444,6 +490,8 @@ class Vgg16(nn.Module):
 ##################################################################################
 # Normalization layers
 ##################################################################################
+
+
 class AdaptiveInstanceNorm2d(nn.Module):
     def __init__(self, num_features, eps=1e-5, momentum=0.1):
         super(AdaptiveInstanceNorm2d, self).__init__()

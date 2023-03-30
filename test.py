@@ -3,8 +3,8 @@ Copyright (C) 2018 NVIDIA Corporation.  All rights reserved.
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
 from __future__ import print_function
-from utils import get_config, pytorch03_to_pytorch04
-from trainer import MUNIT_Trainer, UNIT_Trainer
+from utils import get_config, pytorch03_to_pytorch04, recover
+from trainer import MUNIT_Trainer
 import argparse
 from torch.autograd import Variable
 import torchvision.utils as vutils
@@ -52,6 +52,7 @@ else:
 
 try:
     state_dict = torch.load(opts.checkpoint)
+    print(state_dict.keys())
     trainer.gen_a.load_state_dict(state_dict['a'])
     trainer.gen_b.load_state_dict(state_dict['b'])
 except:
@@ -81,12 +82,12 @@ with torch.no_grad():
     style_image = Variable(transform(Image.open(opts.style).convert('RGB')).unsqueeze(0).cuda()) if opts.style != '' else None
 
     # Start testing
-    content, _ = encode(image)
+    content, _, _ = encode(image)
 
     if opts.trainer == 'MUNIT':
         style_rand = Variable(torch.randn(opts.num_style, style_dim, 1, 1).cuda())
         if opts.style != '':
-            _, style = style_encode(style_image)
+            _, style, _ = style_encode(style_image)
         else:
             style = style_rand
         for j in range(opts.num_style):

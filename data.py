@@ -3,7 +3,10 @@ Copyright (C) 2018 NVIDIA Corporation.  All rights reserved.
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
 import torch.utils.data as data
+from torchvision import datasets, transforms
 import os.path
+import numpy as np
+
 
 def default_loader(path):
     return Image.open(path).convert('RGB')
@@ -127,3 +130,24 @@ class ImageFolder(data.Dataset):
 
     def __len__(self):
         return len(self.imgs)
+
+
+class ImageFolderWithLabels(datasets.ImageFolder):
+    def __init__(self, root, transform):
+        super(ImageFolderWithLabels, self).__init__(root, transform)
+        targets = [np.asarray([s[1] for s in self.samples])]
+        self.targets = targets
+        self.num_classes = len(np.unique(targets))
+        self.img_num = len(self.samples)
+        self.transform = transform
+
+    def __getitem__(self, idx):
+        path, label = self.samples[idx]
+        img = self.loader(path)
+        # label = self.to_onehot(label)
+
+        if self.transform is not None:
+            img = self.transform(img)
+        else:
+            img = transforms.ToTensor(img)
+        return img, label

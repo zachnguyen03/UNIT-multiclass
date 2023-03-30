@@ -2,13 +2,13 @@
 Copyright (C) 2018 NVIDIA Corporation.  All rights reserved.
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
-from torch.utils.serialization import load_lua
+# from torch.utils.serialization import load_lua
 from torch.utils.data import DataLoader
 from networks import Vgg16
 from torch.autograd import Variable
 from torch.optim import lr_scheduler
 from torchvision import transforms
-from data import ImageFilelist, ImageFolder
+from data import ImageFilelist, ImageFolder, ImageFolderWithLabels
 import torch
 import os
 import math
@@ -48,13 +48,13 @@ def get_all_data_loaders(conf):
     width = conf['crop_image_width']
 
     if 'data_root' in conf:
-        train_loader_a = get_data_loader_folder(os.path.join(conf['data_root'], 'trainA'), batch_size, True,
+        train_loader_a = get_data_loader_folder(os.path.join(conf['data_root'], 'train_all'), batch_size, True,
                                               new_size_a, height, width, num_workers, True)
-        test_loader_a = get_data_loader_folder(os.path.join(conf['data_root'], 'testA'), batch_size, False,
+        test_loader_a = get_data_loader_folder(os.path.join(conf['data_root'], 'query'), batch_size, False,
                                              new_size_a, new_size_a, new_size_a, num_workers, True)
-        train_loader_b = get_data_loader_folder(os.path.join(conf['data_root'], 'trainB'), batch_size, True,
+        train_loader_b = get_data_loader_folder(os.path.join(conf['data_root'], 'train_all'), batch_size, True,
                                               new_size_b, height, width, num_workers, True)
-        test_loader_b = get_data_loader_folder(os.path.join(conf['data_root'], 'testB'), batch_size, False,
+        test_loader_b = get_data_loader_folder(os.path.join(conf['data_root'], 'query'), batch_size, False,
                                              new_size_b, new_size_b, new_size_b, num_workers, True)
     else:
         train_loader_a = get_data_loader_list(conf['data_folder_train_a'], conf['data_list_train_a'], batch_size, True,
@@ -81,6 +81,7 @@ def get_data_loader_list(root, file_list, batch_size, train, new_size=None,
     loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=train, drop_last=True, num_workers=num_workers)
     return loader
 
+
 def get_data_loader_folder(input_folder, batch_size, train, new_size=None,
                            height=256, width=256, num_workers=4, crop=True):
     transform_list = [transforms.ToTensor(),
@@ -90,7 +91,7 @@ def get_data_loader_folder(input_folder, batch_size, train, new_size=None,
     transform_list = [transforms.Resize(new_size)] + transform_list if new_size is not None else transform_list
     transform_list = [transforms.RandomHorizontalFlip()] + transform_list if train else transform_list
     transform = transforms.Compose(transform_list)
-    dataset = ImageFolder(input_folder, transform=transform)
+    dataset = ImageFolderWithLabels(input_folder, transform=transform)
     loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=train, drop_last=True, num_workers=num_workers)
     return loader
 
@@ -216,23 +217,23 @@ def get_model_list(dirname, key):
     return last_model_name
 
 
-def load_vgg16(model_dir):
-    """ Use the model from https://github.com/abhiskk/fast-neural-style/blob/master/neural_style/utils.py """
-    if not os.path.exists(model_dir):
-        os.mkdir(model_dir)
-    if not os.path.exists(os.path.join(model_dir, 'vgg16.weight')):
-        if not os.path.exists(os.path.join(model_dir, 'vgg16.t7')):
-            os.system('wget https://www.dropbox.com/s/76l3rt4kyi3s8x7/vgg16.t7?dl=1 -O ' + os.path.join(model_dir, 'vgg16.t7'))
-        vgglua = load_lua(os.path.join(model_dir, 'vgg16.t7'))
-        vgg = Vgg16()
-        for (src, dst) in zip(vgglua.parameters()[0], vgg.parameters()):
-            dst.data[:] = src
-        torch.save(vgg.state_dict(), os.path.join(model_dir, 'vgg16.weight'))
-    vgg = Vgg16()
-    vgg.load_state_dict(torch.load(os.path.join(model_dir, 'vgg16.weight')))
-    return vgg
+# def load_vgg16(model_dir):
+#     """ Use the model from https://github.com/abhiskk/fast-neural-style/blob/master/neural_style/utils.py """
+#     if not os.path.exists(model_dir):
+#         os.mkdir(model_dir)
+#     if not os.path.exists(os.path.join(model_dir, 'vgg16.weight')):
+#         if not os.path.exists(os.path.join(model_dir, 'vgg16.t7')):
+#             os.system('wget https://www.dropbox.com/s/76l3rt4kyi3s8x7/vgg16.t7?dl=1 -O ' + os.path.join(model_dir, 'vgg16.t7'))
+#         vgglua = load_lua(os.path.join(model_dir, 'vgg16.t7'))
+#         vgg = Vgg16()
+#         for (src, dst) in zip(vgglua.parameters()[0], vgg.parameters()):
+#             dst.data[:] = src
+#         torch.save(vgg.state_dict(), os.path.join(model_dir, 'vgg16.weight'))
+#     vgg = Vgg16()
+#     vgg.load_state_dict(torch.load(os.path.join(model_dir, 'vgg16.weight')))
+#     return vgg
 
-
+    
 def vgg_preprocess(batch):
     tensortype = type(batch.data)
     (r, g, b) = torch.chunk(batch, 3, dim = 1)
@@ -341,3 +342,20 @@ def pytorch03_to_pytorch04(state_dict_base):
     state_dict['a'] = __conversion_core(state_dict_base['a'])
     state_dict['b'] = __conversion_core(state_dict_base['b'])
     return state_dict
+
+
+def to_onehot(target, num_classes):
+    targets_oh = torch.zeros((len(target), num_classes))
+    targets_oh[list(range(len(target))), target] = 1
+    return targets_oh
+    
+
+def recover(inp):
+    """Imshow for Tensor."""
+    inp = inp.numpy().transpose((1, 2, 0))
+    mean = np.array([0.485, 0.456, 0.406])
+    std = np.array([0.229, 0.224, 0.225])
+    inp = std * inp + mean
+    inp = inp * 255.0
+    inp = np.clip(inp, 0, 255)
+    return inp
